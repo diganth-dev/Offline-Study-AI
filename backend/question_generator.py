@@ -360,11 +360,12 @@ def generate_important_questions(
     persist_directory: Optional[str] = None,
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
     ollama_base_url: str = OLLAMA_BASE_URL,
+    user_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Generates 10-15 important study questions based on the complete selected document.
 
     Workflow:
-    1. Validates document existence in ChromaDB.
+    1. Validates document existence and ownership in ChromaDB for the user.
     2. Retrieves all indexed chunks sequentially for the document.
     3. Handles empty or non-extractable documents gracefully.
     4. Gathers full-document context across all pages (using representative sampling for long documents).
@@ -380,6 +381,7 @@ def generate_important_questions(
         persist_directory: Custom ChromaDB directory if applicable.
         ollama_model: Ollama model name.
         ollama_base_url: Ollama daemon URL.
+        user_id: Optional authenticated user ID for data isolation.
 
     Returns:
         Dict matching ImportantQuestionsResponse schema.
@@ -388,25 +390,27 @@ def generate_important_questions(
     if not clean_doc_id:
         raise HTTPException(status_code=400, detail="Document ID cannot be empty.")
 
-    # 1. Fetch document metadata summary
+    # 1. Fetch document metadata summary (scoped strictly to user_id)
     indexed_docs = get_indexed_documents(
         collection_name=collection_name,
         persist_directory=persist_directory,
+        user_id=user_id,
     )
     doc_meta = next((d for d in indexed_docs if d.get("document_id") == clean_doc_id), None)
     if not doc_meta:
         raise HTTPException(
             status_code=404,
-            detail=f"Document with ID '{clean_doc_id}' was not found in the study library.",
+            detail=f"Document with ID '{clean_doc_id}' was not found in your study library.",
         )
 
     filename = doc_meta["filename"]
 
-    # 2. Retrieve all chunks belonging to this document
+    # 2. Retrieve all chunks belonging to this document (scoped strictly to user_id)
     all_chunks = get_document_chunks(
         document_id=clean_doc_id,
         collection_name=collection_name,
         persist_directory=persist_directory,
+        user_id=user_id,
     )
 
     if not all_chunks or not any(c.get("text", "").strip() for c in all_chunks):
@@ -505,6 +509,7 @@ def generate_question_answer(
     persist_directory: Optional[str] = None,
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
     ollama_base_url: str = OLLAMA_BASE_URL,
+    user_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Generates a clear, exam-friendly answer for an individual study question.
 
@@ -517,6 +522,7 @@ def generate_question_answer(
         persist_directory: ChromaDB directory.
         ollama_model: Ollama model.
         ollama_base_url: Ollama URL.
+        user_id: Optional user ID for strict multi-user isolation.
 
     Returns:
         Dict matching QuestionAnswerResponse schema.
@@ -528,16 +534,17 @@ def generate_question_answer(
     if not clean_q:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
-    # 1. Fetch document metadata
+    # 1. Fetch document metadata (strictly scoped to user_id)
     indexed_docs = get_indexed_documents(
         collection_name=collection_name,
         persist_directory=persist_directory,
+        user_id=user_id,
     )
     doc_meta = next((d for d in indexed_docs if d.get("document_id") == clean_doc_id), None)
     if not doc_meta:
         raise HTTPException(
             status_code=404,
-            detail=f"Document with ID '{clean_doc_id}' was not found in the study library.",
+            detail=f"Document with ID '{clean_doc_id}' was not found in your study library.",
         )
 
     filename = doc_meta["filename"]
@@ -545,7 +552,7 @@ def generate_question_answer(
     # 2. Verify Ollama
     check_ollama_availability(base_url=ollama_base_url, model=ollama_model)
 
-    # 3. Retrieve relevant chunks scoped strictly to document_id
+    # 3. Retrieve relevant chunks scoped strictly to document_id and user_id
     is_comp = is_comparison_question(clean_q)
     search_k = 6 if is_comp else (4 if question_type == "long" else 3)
     chunks = search_documents(
@@ -554,6 +561,7 @@ def generate_question_answer(
         collection_name=collection_name,
         persist_directory=persist_directory,
         document_id=clean_doc_id,
+        user_id=user_id,
     )
 
     # For comparison questions, ensure chunks covering both topics are present
@@ -569,6 +577,7 @@ def generate_question_answer(
                     collection_name=collection_name,
                     persist_directory=persist_directory,
                     document_id=clean_doc_id,
+                    user_id=user_id,
                 )
                 seen_chunk_ids = {c.get("chunk_id") for c in chunks}
                 for ec in extra_chunks:
@@ -589,6 +598,7 @@ def generate_question_answer(
             document_id=clean_doc_id,
             collection_name=collection_name,
             persist_directory=persist_directory,
+            user_id=user_id,
         )
         page_chunks = [c for c in doc_chunks if c.get("page_number") in page_numbers]
         for pc in page_chunks:

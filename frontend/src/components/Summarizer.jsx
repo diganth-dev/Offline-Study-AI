@@ -15,6 +15,7 @@ import {
   Lightbulb,
   Bookmark,
   Share2,
+  ServerOff,
 } from 'lucide-react';
 import { summarizeDocument } from '../api';
 import MarkdownRenderer from './MarkdownRenderer';
@@ -25,6 +26,9 @@ export default function Summarizer({
   onSelectDocument,
   setActiveTab,
   onSelectDocumentForChat,
+  isBackendHealthy = true,
+  currentUser = null,
+  onOpenAuth,
 }) {
   const [currentDocId, setCurrentDocId] = useState(
     selectedDocument ? selectedDocument.document_id : (documents[0]?.document_id || '')
@@ -50,6 +54,12 @@ export default function Summarizer({
   const handleGenerateSummary = async (docId = currentDocId) => {
     if (!docId) {
       setErrorMessage('Please select a document from the list to summarize.');
+      return;
+    }
+
+    if (!currentUser) {
+      setErrorMessage('Authentication required. Please sign in or create an account to summarize your documents.');
+      if (onOpenAuth) onOpenAuth();
       return;
     }
 
@@ -95,6 +105,26 @@ export default function Summarizer({
 
   return (
     <div className="page-container">
+      {/* Backend Offline Warning Banner */}
+      {!isBackendHealthy && (
+        <div className="card backend-warning-card" style={{ marginBottom: '1.5rem', borderColor: '#fecaca', backgroundColor: '#fff5f5' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.85rem' }}>
+            <ServerOff size={24} color="#dc2626" style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div>
+              <h4 style={{ color: '#991b1b', fontWeight: 700, marginBottom: '0.25rem' }}>
+                AI Summarizer Unavailable (Backend Offline)
+              </h4>
+              <p style={{ fontSize: '0.875rem', color: '#7f1d1d', marginBottom: '0.5rem' }}>
+                The frontend shell is loaded from offline cache. Generating complete summaries with local Ollama requires the Python FastAPI backend server to be running:
+              </p>
+              <code style={{ display: 'inline-block', backgroundColor: '#fee2e2', color: '#991b1b', padding: '0.35rem 0.65rem', borderRadius: '6px', fontSize: '0.85rem', fontFamily: 'monospace' }}>
+                python -m uvicorn backend.main:app --reload
+              </code>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Header Bar */}
       <div className="card" style={{ marginBottom: '1.5rem' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '1rem' }}>
@@ -141,8 +171,9 @@ export default function Summarizer({
             <button
               className="btn-primary"
               onClick={() => handleGenerateSummary(currentDocId)}
-              disabled={isLoading || !currentDocId}
+              disabled={isLoading || !currentDocId || !isBackendHealthy}
               style={{ display: 'inline-flex', alignItems: 'center', gap: '0.45rem', padding: '0.55rem 1.15rem' }}
+              title={!isBackendHealthy ? 'Backend offline' : 'Generate Summary'}
             >
               {isLoading ? (
                 <>

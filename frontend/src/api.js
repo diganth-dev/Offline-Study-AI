@@ -5,6 +5,61 @@
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
+// Storage keys for authentication tokens and user state
+const TOKEN_STORAGE_KEY = 'study_ai_token';
+const USER_STORAGE_KEY = 'study_ai_user';
+
+/**
+ * Retrieves the stored JWT authentication token from localStorage.
+ */
+export function getStoredToken() {
+  try {
+    return localStorage.getItem(TOKEN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Retrieves the stored user profile object from localStorage.
+ */
+export function getStoredUser() {
+  try {
+    const raw = localStorage.getItem(USER_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Persists authenticated JWT token and user profile into localStorage.
+ */
+export function saveAuthSession(token, user) {
+  try {
+    if (token) {
+      localStorage.setItem(TOKEN_STORAGE_KEY, token);
+    }
+    if (user) {
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
+    }
+  } catch (err) {
+    console.warn('Could not save auth session to localStorage:', err);
+  }
+}
+
+/**
+ * Clears authenticated token and user profile from localStorage.
+ */
+export function clearAuthSession() {
+  try {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    localStorage.removeItem(USER_STORAGE_KEY);
+  } catch (err) {
+    console.warn('Could not clear auth session from localStorage:', err);
+  }
+}
+
 /**
  * Helper to handle fetch responses and extract user-friendly error messages.
  */
@@ -28,29 +83,196 @@ async function handleResponse(response) {
 }
 
 /**
+ * Executes a network fetch with friendly diagnostics for offline and backend connection states.
+ * Automatically injects the stored JWT Bearer token into headers if available.
+ */
+async function safeFetch(url, options = {}) {
+  const token = getStoredToken();
+  const headers = new Headers(options.headers || {});
+
+  // Automatically attach Authorization Bearer header if token exists and not manually provided
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  const mergedOptions = {
+    ...options,
+    headers,
+  };
+
+  try {
+    const response = await fetch(url, mergedOptions);
+    return await handleResponse(response);
+  } catch (err) {
+    // If it's an HTTP error handled by handleResponse, handle 401 and propagate
+    if (err.status) {
+      if (err.status === 401 && !url.includes('/auth/login') && !url.includes('/auth/register')) {
+        // Expired or invalid token encountered on protected endpoint
+        clearAuthSession();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('study-ai:unauthorized', { detail: { error: err } }));
+        }
+      }
+      throw err;
+    }
+
+    const isBrowserOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+
+    if (isBrowserOffline) {
+      throw new Error(
+        'You are currently offline. The application shell is loaded from offline cache, but local AI processing requires the local Python FastAPI backend server to be reachable on http://127.0.0.1:8000.'
+      );
+    }
+
+    throw new Error(
+      `Cannot connect to Offline Study AI backend at ${API_BASE_URL}. Please ensure your local FastAPI backend server is running with: python -m uvicorn backend.main:app --reload`
+    );
+  }
+}
+
+/**
+ * Registers a new user account with username, email, and password.
+ */
+export async function registerUser(username, email, password) {
+  const data = await safeFetch(`${API_BASE_URL}/auth/register`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({ username, email, password }),
+  });
+  if (data?.access_token && data?.user) {
+    saveAuthSession(data.access_token, data.user);
+  }
+  return data;
+}
+
+/**
+ * Authenticates an existing user by username or email and password.
+ */
+export async function loginUser(usernameOrEmail, password) {
+  const data = await safeFetch(`${API_BASE_URL}/auth/login`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      username_or_email: usernameOrEmail,
+      password,
+    }),
+  });
+  if (data?.access_token && data?.user) {
+    saveAuthSession(data.access_token, data.user);
+  }
+  return data;
+}
+
+/**
+ * Authenticates or registers a student via Google Sign-In.
+ * @param {Object} payload - { credential } or { email, name, google_id }
+ */
+export async function loginWithGoogle(payload) {
+  const data = await safeFetch(`${API_BASE_URL}/auth/google`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+  if (data?.access_token && data?.user) {
+    saveAuthSession(data.access_token, data.user);
+  }
+  return data;
+}
+
+/**
+ * Requests a password reset token and 6-digit code for the specified email.
+ * @param {string} email
+ */
+export async function requestForgotPassword(email) {
+  return await safeFetch(`${API_BASE_URL}/auth/forgot-password`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({ email: (email || '').trim() }),
+  });
+}
+
+/**
+ * Resets user password using the verification token / code.
+ * @param {string} token - Reset token or 6-digit code
+ * @param {string} newPassword - New password
+ * @param {string} email - Optional email for confirmation
+ */
+export async function resetUserPassword(token, newPassword, email = null) {
+  const payload = {
+    token: (token || '').trim(),
+    new_password: newPassword,
+  };
+  if (email && email.trim()) {
+    payload.email = email.trim();
+  }
+
+  return await safeFetch(`${API_BASE_URL}/auth/reset-password`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Retrieves the current authenticated user's profile from /auth/me.
+ */
+export async function fetchCurrentUser() {
+  const data = await safeFetch(`${API_BASE_URL}/auth/me`, {
+    method: 'GET',
+    headers: { 'Accept': 'application/json' },
+  });
+  if (data) {
+    const existing = getStoredUser() || {};
+    saveAuthSession(getStoredToken(), {
+      ...existing,
+      user_id: data.user_id,
+      username: data.username,
+      email: data.email,
+    });
+  }
+  return data;
+}
+
+/**
+ * Clears session and logs out the current user.
+ */
+export function logoutUser() {
+  clearAuthSession();
+}
+
+/**
  * Checks backend health and availability.
  */
 export async function checkBackendHealth() {
-  try {
-    const res = await fetch(`${API_BASE_URL}/health`, {
-      method: 'GET',
-      headers: { 'Accept': 'application/json' },
-    });
-    return await handleResponse(res);
-  } catch (err) {
-    throw new Error('Cannot connect to the Offline Study AI backend. Make sure the server is running at http://127.0.0.1:8000.');
-  }
+  return await safeFetch(`${API_BASE_URL}/health`, {
+    method: 'GET',
+    headers: { 'Accept': 'application/json' },
+  });
 }
 
 /**
  * Lists all documents currently indexed in ChromaDB.
  */
 export async function fetchIndexedDocuments() {
-  const res = await fetch(`${API_BASE_URL}/documents`, {
+  return await safeFetch(`${API_BASE_URL}/documents`, {
     method: 'GET',
     headers: { 'Accept': 'application/json' },
   });
-  return await handleResponse(res);
 }
 
 /**
@@ -68,11 +290,10 @@ export async function uploadAndIndexPdf(file) {
   const formData = new FormData();
   formData.append('file', file);
 
-  const res = await fetch(`${API_BASE_URL}/index-pdf`, {
+  return await safeFetch(`${API_BASE_URL}/index-pdf`, {
     method: 'POST',
     body: formData,
   });
-  return await handleResponse(res);
 }
 
 /**
@@ -94,7 +315,7 @@ export async function askAiQuestion(question, topK = 4, documentId = null) {
     payload.document_id = documentId;
   }
 
-  const res = await fetch(`${API_BASE_URL}/ask`, {
+  return await safeFetch(`${API_BASE_URL}/ask`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -102,7 +323,6 @@ export async function askAiQuestion(question, topK = 4, documentId = null) {
     },
     body: JSON.stringify(payload),
   });
-  return await handleResponse(res);
 }
 
 /**
@@ -111,7 +331,7 @@ export async function askAiQuestion(question, topK = 4, documentId = null) {
  * @param {number} topK - Maximum results (default: 5).
  */
 export async function searchDocumentChunks(query, topK = 5) {
-  const res = await fetch(`${API_BASE_URL}/search`, {
+  return await safeFetch(`${API_BASE_URL}/search`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -122,7 +342,6 @@ export async function searchDocumentChunks(query, topK = 5) {
       top_k: topK,
     }),
   });
-  return await handleResponse(res);
 }
 
 /**
@@ -130,11 +349,10 @@ export async function searchDocumentChunks(query, topK = 5) {
  * @param {string} filename - Name of the file to remove.
  */
 export async function deleteIndexedDocument(filename) {
-  const res = await fetch(`${API_BASE_URL}/documents/${encodeURIComponent(filename)}`, {
+  return await safeFetch(`${API_BASE_URL}/documents/${encodeURIComponent(filename)}`, {
     method: 'DELETE',
     headers: { 'Accept': 'application/json' },
   });
-  return await handleResponse(res);
 }
 
 /**
@@ -148,7 +366,7 @@ export async function summarizeDocument(documentId, includeChapters = true) {
     throw new Error('Please specify a document to summarize.');
   }
 
-  const res = await fetch(`${API_BASE_URL}/summarize`, {
+  return await safeFetch(`${API_BASE_URL}/summarize`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -159,7 +377,6 @@ export async function summarizeDocument(documentId, includeChapters = true) {
       include_chapters: includeChapters,
     }),
   });
-  return await handleResponse(res);
 }
 
 /**
@@ -173,7 +390,7 @@ export async function generateImportantQuestions(documentId, count = 12) {
     throw new Error('Please select a document to generate questions.');
   }
 
-  const res = await fetch(`${API_BASE_URL}/important-questions`, {
+  return await safeFetch(`${API_BASE_URL}/important-questions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -184,7 +401,6 @@ export async function generateImportantQuestions(documentId, count = 12) {
       count: count,
     }),
   });
-  return await handleResponse(res);
 }
 
 /**
@@ -202,7 +418,7 @@ export async function generateQuestionAnswer(documentId, question, questionType 
     throw new Error('Question text is required.');
   }
 
-  const res = await fetch(`${API_BASE_URL}/important-questions/answer`, {
+  return await safeFetch(`${API_BASE_URL}/important-questions/answer`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -215,5 +431,4 @@ export async function generateQuestionAnswer(documentId, question, questionType 
       page_numbers: pageNumbers || [],
     }),
   });
-  return await handleResponse(res);
 }

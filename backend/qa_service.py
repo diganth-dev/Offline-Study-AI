@@ -138,6 +138,7 @@ def answer_study_question(
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
     ollama_base_url: str = OLLAMA_BASE_URL,
     document_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Answers a question based strictly on uploaded document content or metadata.
 
@@ -149,7 +150,7 @@ def answer_study_question(
        document count, filenames, chunk count). If so, answers directly from ChromaDB
        metadata without invoking Ollama.
     4. For normal study questions: verifies Ollama availability and retrieves top_k chunks
-       (filtered by document_id when specified).
+       (filtered by user_id and document_id when specified).
     5. Evaluates relevance threshold: if no relevant info found, clearly notifies user.
     6. Formats prompt and invokes Ollama to synthesize a grounded answer.
     7. Returns answer, source metadata (filename, page numbers), and retrieved chunks.
@@ -162,6 +163,7 @@ def answer_study_question(
         ollama_model: Model name for Ollama (default: qwen2.5:1.5b).
         ollama_base_url: Base URL for Ollama daemon.
         document_id: Optional document ID to restrict search and metadata to a single document.
+        user_id: Optional user ID to isolate search to the authenticated user.
 
     Returns:
         Dict with keys:
@@ -175,10 +177,11 @@ def answer_study_question(
     if not clean_question:
         raise ValueError("Question cannot be empty.")
 
-    # 1. Fetch indexed documents to inspect metadata
+    # 1. Fetch indexed documents to inspect metadata (scoped to user_id)
     indexed_docs = get_indexed_documents(
         collection_name=collection_name,
         persist_directory=persist_directory,
+        user_id=user_id,
     )
 
     selected_doc: Optional[dict[str, Any]] = None
@@ -241,6 +244,7 @@ def answer_study_question(
             document_id=target_doc["document_id"],
             collection_name=collection_name,
             persist_directory=persist_directory,
+            user_id=user_id,
         )
         if not all_chunks or not any(c.get("text", "").strip() for c in all_chunks):
             return {
@@ -352,13 +356,14 @@ def answer_study_question(
     is_comp = is_comparison_question(clean_question)
     search_k = max(top_k, 6) if (is_short or is_comp) else top_k
 
-    # Retrieve relevant chunks via hybrid search (scoped to document_id if provided)
+    # Retrieve relevant chunks via hybrid search (scoped to document_id and user_id if provided)
     chunks = search_documents(
         query=clean_question,
         top_k=search_k,
         collection_name=collection_name,
         persist_directory=persist_directory,
         document_id=document_id,
+        user_id=user_id,
     )
 
     # For comparison questions, ensure chunks covering both topics are present
@@ -374,6 +379,7 @@ def answer_study_question(
                     collection_name=collection_name,
                     persist_directory=persist_directory,
                     document_id=document_id,
+                    user_id=user_id,
                 )
                 seen_chunk_ids = {c.get("chunk_id") for c in chunks}
                 for ec in extra_chunks:

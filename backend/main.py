@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Any, Optional
@@ -34,6 +34,15 @@ try:
         OllamaModelNotFoundError,
         OllamaError,
     )
+    from backend.auth_service import (
+        get_current_user,
+        register_user,
+        authenticate_user,
+        create_access_token,
+        authenticate_google_user,
+        request_password_reset,
+        reset_password,
+    )
 except ImportError:
     from chunking import (
         chunk_text,
@@ -60,11 +69,77 @@ except ImportError:
         OllamaModelNotFoundError,
         OllamaError,
     )
+    from auth_service import (
+        get_current_user,
+        register_user,
+        authenticate_user,
+        create_access_token,
+        authenticate_google_user,
+        request_password_reset,
+        reset_password,
+    )
 
 
 # ---------------------------------------------------------
 # Pydantic Models
 # ---------------------------------------------------------
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=30, description="Unique username (3-30 chars, alphanumeric/underscore/hyphen)")
+    email: str = Field(..., description="Unique user email address")
+    password: str = Field(..., min_length=6, description="User password (at least 6 characters)")
+
+
+class LoginRequest(BaseModel):
+    username_or_email: str = Field(..., min_length=1, description="Username or email address")
+    password: str = Field(..., min_length=1, description="Password")
+
+
+class AuthUser(BaseModel):
+    user_id: str = Field(..., description="Unique user identifier")
+    username: str = Field(..., description="User's unique username")
+    email: str = Field(..., description="User's unique email address")
+
+
+class AuthResponse(BaseModel):
+    access_token: str = Field(..., description="Cryptographically signed JWT Bearer token")
+    token_type: str = Field(default="bearer", description="Token type")
+    user: AuthUser = Field(..., description="Authenticated user profile")
+
+
+class UserProfileResponse(BaseModel):
+    user_id: str = Field(..., description="Unique user identifier")
+    username: str = Field(..., description="Username")
+    email: str = Field(..., description="Email address")
+    created_at: float = Field(..., description="Account creation timestamp")
+
+
+class GoogleLoginRequest(BaseModel):
+    credential: Optional[str] = Field(default=None, description="Google ID Token JWT")
+    email: Optional[str] = Field(default=None, description="Google user email")
+    name: Optional[str] = Field(default=None, description="Google user display name")
+    google_id: Optional[str] = Field(default=None, description="Google sub identifier")
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(..., description="Registered account email address")
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str
+    expires_in_minutes: int = 15
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., min_length=1, description="Reset token or 6-digit verification code")
+    new_password: str = Field(..., min_length=6, description="New user password (at least 6 characters)")
+    email: Optional[str] = Field(default=None, description="Optional email address to verify against")
+
+
+class ResetPasswordResponse(BaseModel):
+    message: str
+    success: bool = True
+
 
 class ChunkResponse(BaseModel):
     chunk_number: int = Field(..., description="1-based sequential chunk number")
@@ -246,14 +321,108 @@ def health_check():
     return {"status": "healthy"}
 
 
+# ---------------------------------------------------------
+# Authentication Endpoints
+# ---------------------------------------------------------
+
+@app.post(
+    "/auth/register",
+    response_model=AuthResponse,
+    status_code=201,
+    summary="Register a new user account",
+    description="Registers a new user with username, email, and password, returning an authenticated JWT session."
+)
+async def register_endpoint(request: RegisterRequest):
+    try:
+        return register_user(
+            username=request.username,
+            email=request.email,
+            password=request.password,
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=str(e),
+        )
+
+
+@app.post(
+    "/auth/login",
+    response_model=AuthResponse,
+    summary="Log into user account",
+    description="Authenticates user by username or email and password, returning an authenticated JWT session."
+)
+async def login_endpoint(request: LoginRequest):
+    return authenticate_user(
+        username_or_email=request.username_or_email,
+        password=request.password,
+    )
+
+
+@app.get(
+    "/auth/me",
+    response_model=UserProfileResponse,
+    summary="Get current user profile",
+    description="Returns the profile information of the currently authenticated user."
+)
+async def get_current_user_profile(
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    return {
+        "user_id": current_user["user_id"],
+        "username": current_user["username"],
+        "email": current_user["email"],
+        "created_at": current_user["created_at"],
+    }
+
+
+@app.post(
+    "/auth/google",
+    response_model=AuthResponse,
+    summary="Sign in or register with Google",
+    description="Authenticates or auto-registers a student via Google OAuth ID token or profile details, returning an authenticated JWT session."
+)
+async def google_auth_endpoint(request: GoogleLoginRequest):
+    return authenticate_google_user(
+        credential=request.credential,
+        email=request.email,
+        name=request.name,
+        google_id=request.google_id,
+    )
+
+
+@app.post(
+    "/auth/forgot-password",
+    response_model=ForgotPasswordResponse,
+    summary="Request password reset",
+    description="Generates a password reset token and 6-digit verification code for a registered user."
+)
+async def forgot_password_endpoint(request: ForgotPasswordRequest):
+    return request_password_reset(email=request.email)
+
+
+@app.post(
+    "/auth/reset-password",
+    response_model=ResetPasswordResponse,
+    summary="Reset user password",
+    description="Resets user password using a valid reset token or 6-digit verification code."
+)
+async def reset_password_endpoint(request: ResetPasswordRequest):
+    return reset_password(
+        token_or_code=request.token,
+        new_password=request.new_password,
+        email=request.email,
+    )
+
+
 @app.get(
     "/documents",
     response_model=DocumentsListResponse,
-    summary="List all indexed documents",
-    description="Retrieves a list of all documents currently indexed in ChromaDB."
+    summary="List all indexed documents for authenticated user",
+    description="Retrieves a list of all documents belonging to the authenticated user currently indexed in ChromaDB."
 )
-def list_documents():
-    docs = get_indexed_documents()
+def list_documents(current_user: dict[str, Any] = Depends(get_current_user)):
+    docs = get_indexed_documents(user_id=current_user["user_id"])
     return {
         "total_documents": len(docs),
         "documents": docs
@@ -262,15 +431,18 @@ def list_documents():
 
 @app.delete(
     "/documents/{filename}",
-    summary="Delete an indexed document",
-    description="Removes all chunks of the specified document from ChromaDB."
+    summary="Delete an indexed document for authenticated user",
+    description="Removes all chunks of the specified document belonging to the authenticated user from ChromaDB."
 )
-def remove_document(filename: str):
-    deleted_count = delete_document(filename)
+def remove_document(
+    filename: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    deleted_count = delete_document(filename, user_id=current_user["user_id"])
     if deleted_count == 0:
         raise HTTPException(
             status_code=404,
-            detail=f"Document '{filename}' not found in the vector store."
+            detail=f"Document '{filename}' not found in your library."
         )
     return {
         "message": f"Successfully deleted '{filename}' from vector store.",
@@ -288,7 +460,10 @@ def remove_document(filename: str):
     summary="Upload PDF and extract text chunks",
     description="Uploads a PDF file, extracts text page-by-page, and divides it into chunks with page numbers and chunk numbers preserved."
 )
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_pdf(
+    file: UploadFile = File(...),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     content = await file.read()
     total_pages, chunks = extract_and_chunk_pdf(
         content=content,
@@ -312,10 +487,13 @@ async def upload_pdf(file: UploadFile = File(...)):
 @app.post(
     "/index-pdf",
     response_model=IndexPDFResponse,
-    summary="Index PDF into ChromaDB",
-    description="Extracts PDF text, chunks it, generates Hugging Face embeddings (all-MiniLM-L6-v2), and persists vectors into ChromaDB."
+    summary="Index PDF into ChromaDB for authenticated user",
+    description="Extracts PDF text, chunks it, generates Hugging Face embeddings (all-MiniLM-L6-v2), and persists vectors into ChromaDB scoped to the authenticated user."
 )
-async def index_pdf(file: UploadFile = File(...)):
+async def index_pdf(
+    file: UploadFile = File(...),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     content = await file.read()
     total_pages, chunks = extract_and_chunk_pdf(
         content=content,
@@ -329,6 +507,7 @@ async def index_pdf(file: UploadFile = File(...)):
             filename=file.filename or "unknown.pdf",
             total_pages=total_pages,
             chunks=chunks,
+            user_id=current_user["user_id"],
         )
     except Exception as e:
         raise HTTPException(
@@ -352,8 +531,11 @@ async def index_pdf(file: UploadFile = File(...)):
     response_model=IndexPDFResponse,
     include_in_schema=False
 )
-async def index_alias(file: UploadFile = File(...)):
-    return await index_pdf(file)
+async def index_alias(
+    file: UploadFile = File(...),
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    return await index_pdf(file, current_user=current_user)
 
 
 # ---------------------------------------------------------
@@ -364,9 +546,12 @@ async def index_alias(file: UploadFile = File(...)):
     "/search",
     response_model=SearchResponse,
     summary="Search indexed documents",
-    description="Searches indexed PDF chunks using a semantic text query with Hugging Face embeddings."
+    description="Searches indexed PDF chunks belonging to the authenticated user using a semantic text query with Hugging Face embeddings."
 )
-async def search_endpoint(request: SearchRequest):
+async def search_endpoint(
+    request: SearchRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     if not request.query or not request.query.strip():
         raise HTTPException(
             status_code=400,
@@ -378,6 +563,7 @@ async def search_endpoint(request: SearchRequest):
             query=request.query.strip(),
             top_k=request.top_k,
             document_id=request.document_id,
+            user_id=current_user["user_id"],
         )
     except Exception as e:
         raise HTTPException(
@@ -401,12 +587,16 @@ async def search_endpoint(request: SearchRequest):
 async def search_get_endpoint(
     query: str = Query(..., min_length=1, description="Natural language search query"),
     top_k: int = Query(default=5, ge=1, le=50, description="Maximum number of relevant chunks to return"),
-    document_id: Optional[str] = Query(default=None, description="Optional document ID to restrict search results")
+    document_id: Optional[str] = Query(default=None, description="Optional document ID to restrict search results"),
+    current_user: dict[str, Any] = Depends(get_current_user),
 ):
     actual_query = query if not hasattr(query, "default") else ""
     actual_top_k = top_k if not hasattr(top_k, "default") else 5
     actual_doc_id = document_id if not hasattr(document_id, "default") else None
-    return await search_endpoint(SearchRequest(query=actual_query, top_k=actual_top_k, document_id=actual_doc_id))
+    return await search_endpoint(
+        SearchRequest(query=actual_query, top_k=actual_top_k, document_id=actual_doc_id),
+        current_user=current_user,
+    )
 
 
 # ---------------------------------------------------------
@@ -419,7 +609,10 @@ async def search_get_endpoint(
     summary="Ask a question about indexed documents",
     description="Retrieves the most relevant chunks from ChromaDB and generates an answer strictly grounded in the documents using local Ollama (qwen2.5:1.5b). Supports document_id to focus exclusively on a single PDF."
 )
-async def ask_endpoint(request: AskRequest):
+async def ask_endpoint(
+    request: AskRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     if not request.question or not request.question.strip():
         raise HTTPException(
             status_code=400,
@@ -431,6 +624,7 @@ async def ask_endpoint(request: AskRequest):
             question=request.question.strip(),
             top_k=request.top_k,
             document_id=request.document_id,
+            user_id=current_user["user_id"],
         )
         return result
     except OllamaConnectionError as e:
@@ -467,7 +661,10 @@ async def ask_endpoint(request: AskRequest):
     summary="Generate a complete document summary",
     description="Generates a structured, student-friendly document summary with Overview, Main Topics, Important Points, Key Takeaways, and optional Chapter breakdowns using local Ollama (qwen2.5:1.5b)."
 )
-async def summarize_endpoint(request: SummarizeRequest):
+async def summarize_endpoint(
+    request: SummarizeRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     if not request.document_id or not request.document_id.strip():
         raise HTTPException(
             status_code=400,
@@ -478,6 +675,7 @@ async def summarize_endpoint(request: SummarizeRequest):
         return summarize_document(
             document_id=request.document_id.strip(),
             include_chapters=request.include_chapters,
+            user_id=current_user["user_id"],
         )
     except OllamaConnectionError as e:
         raise HTTPException(
@@ -509,8 +707,14 @@ async def summarize_endpoint(request: SummarizeRequest):
     summary="Get or generate document summary (GET)",
     description="Convenience GET endpoint to summarize a document by its document_id."
 )
-async def get_document_summary_endpoint(document_id: str):
-    return await summarize_endpoint(SummarizeRequest(document_id=document_id))
+async def get_document_summary_endpoint(
+    document_id: str,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
+    return await summarize_endpoint(
+        SummarizeRequest(document_id=document_id),
+        current_user=current_user,
+    )
 
 
 # ---------------------------------------------------------
@@ -523,7 +727,10 @@ async def get_document_summary_endpoint(document_id: str):
     summary="Generate important exam study questions",
     description="Generates 10-15 important study questions categorized into Short-Answer, Long-Answer, and Conceptual questions covering the complete selected PDF using local Ollama (qwen2.5:1.5b)."
 )
-async def generate_important_questions_endpoint(request: ImportantQuestionsRequest):
+async def generate_important_questions_endpoint(
+    request: ImportantQuestionsRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     if not request.document_id or not request.document_id.strip():
         raise HTTPException(
             status_code=400,
@@ -534,6 +741,7 @@ async def generate_important_questions_endpoint(request: ImportantQuestionsReque
         return generate_important_questions(
             document_id=request.document_id.strip(),
             count=request.count,
+            user_id=current_user["user_id"],
         )
     except OllamaConnectionError as e:
         raise HTTPException(
@@ -567,10 +775,12 @@ async def generate_important_questions_endpoint(request: ImportantQuestionsReque
 )
 async def get_document_important_questions_endpoint(
     document_id: str,
-    count: int = Query(default=12, ge=5, le=30, description="Approximate number of questions to generate")
+    count: int = Query(default=12, ge=5, le=30, description="Approximate number of questions to generate"),
+    current_user: dict[str, Any] = Depends(get_current_user),
 ):
     return await generate_important_questions_endpoint(
-        ImportantQuestionsRequest(document_id=document_id, count=count)
+        ImportantQuestionsRequest(document_id=document_id, count=count),
+        current_user=current_user,
     )
 
 
@@ -580,7 +790,10 @@ async def get_document_important_questions_endpoint(
     summary="Generate exam-friendly answer for an individual question",
     description="Generates a simple, exam-friendly answer for an individual study question grounded strictly in the selected PDF."
 )
-async def answer_individual_question_endpoint(request: QuestionAnswerRequest):
+async def answer_individual_question_endpoint(
+    request: QuestionAnswerRequest,
+    current_user: dict[str, Any] = Depends(get_current_user),
+):
     if not request.document_id or not request.document_id.strip():
         raise HTTPException(status_code=400, detail="Document ID cannot be empty.")
     if not request.question or not request.question.strip():
@@ -592,6 +805,7 @@ async def answer_individual_question_endpoint(request: QuestionAnswerRequest):
             question=request.question.strip(),
             question_type=request.question_type or "short",
             page_numbers=request.page_numbers or [],
+            user_id=current_user["user_id"],
         )
     except OllamaConnectionError as e:
         raise HTTPException(status_code=503, detail=f"Ollama connection error: {str(e)}")

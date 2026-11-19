@@ -1,5 +1,5 @@
 import React from 'react';
-import { FileText, MessageSquare, UploadCloud, BookOpen, Layers, ArrowRight, Lightbulb, CheckCircle2, FileQuestion } from 'lucide-react';
+import { FileText, MessageSquare, UploadCloud, BookOpen, Layers, ArrowRight, Lightbulb, FileQuestion, ServerOff } from 'lucide-react';
 
 export default function Dashboard({
   documents = [],
@@ -7,6 +7,7 @@ export default function Dashboard({
   setActiveTab,
   onSelectDocumentForChat,
   isBackendHealthy,
+  currentUser = null,
 }) {
   const totalDocs = documents.length;
   const totalChunks = documents.reduce((sum, doc) => sum + (doc.total_chunks || 0), 0);
@@ -17,7 +18,7 @@ export default function Dashboard({
       {/* Welcome Banner */}
       <div className="welcome-banner">
         <div className="welcome-text">
-          <h1>Welcome to Offline Study AI! 🎓</h1>
+          <h1>Welcome to Offline Study AI{currentUser ? `, ${currentUser.username}` : ''}! 🎓</h1>
           <p>
             Your private, offline learning companion. Upload your class notes, textbook chapters, or lecture slides,
             and study with an AI assistant that answers questions strictly based on your documents.
@@ -27,6 +28,26 @@ export default function Dashboard({
           <BookOpen size={64} style={{ opacity: 0.15 }} />
         </div>
       </div>
+
+      {/* Backend Offline Warning Banner */}
+      {!isBackendHealthy && (
+        <div className="card backend-warning-card" style={{ marginBottom: '1.5rem', borderColor: '#fecaca', backgroundColor: '#fff5f5' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.85rem' }}>
+            <ServerOff size={24} color="#dc2626" style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div>
+              <h4 style={{ color: '#991b1b', fontWeight: 700, marginBottom: '0.25rem' }}>
+                Local AI Backend is Currently Offline
+              </h4>
+              <p style={{ fontSize: '0.875rem', color: '#7f1d1d', marginBottom: '0.5rem' }}>
+                The application shell is running offline via PWA caching. To upload new PDFs, ask questions, generate summaries, or generate exam questions, please start your local Python backend:
+              </p>
+              <code style={{ display: 'inline-block', backgroundColor: '#fee2e2', color: '#991b1b', padding: '0.35rem 0.65rem', borderRadius: '6px', fontSize: '0.85rem', fontFamily: 'monospace' }}>
+                python -m uvicorn backend.main:app --reload
+              </code>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Stats Grid */}
       <div className="stats-grid">

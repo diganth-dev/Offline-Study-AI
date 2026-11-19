@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { UploadCloud, FileText, CheckCircle2, AlertCircle, Trash2, MessageSquare, Loader2, Sparkles, FileQuestion } from 'lucide-react';
+import { UploadCloud, FileText, CheckCircle2, AlertCircle, Trash2, MessageSquare, Loader2, Sparkles, FileQuestion, ServerOff } from 'lucide-react';
 import { uploadAndIndexPdf, deleteIndexedDocument } from '../api';
 
 export default function Documents({
@@ -9,6 +9,8 @@ export default function Documents({
   onSelectDocumentForChat,
   onSelectDocumentForSummarize,
   onSelectDocumentForQuestions,
+  isBackendHealthy = true,
+  currentUser = null,
 }) {
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -43,6 +45,15 @@ export default function Documents({
 
   const handleFileUpload = async (file) => {
     if (!file) return;
+
+    if (!currentUser) {
+      setStatusMessage({
+        type: 'error',
+        text: 'Authentication required. Please sign in or create an account to index PDFs into your private library.',
+      });
+      if (onOpenAuth) onOpenAuth();
+      return;
+    }
 
     if (!file.name.toLowerCase().endsWith('.pdf')) {
       setStatusMessage({
@@ -112,13 +123,34 @@ export default function Documents({
 
   return (
     <div className="page-container">
+      {/* Backend Offline Warning Banner */}
+      {!isBackendHealthy && (
+        <div className="card backend-warning-card" style={{ marginBottom: '1.5rem', borderColor: '#fecaca', backgroundColor: '#fff5f5' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.85rem' }}>
+            <ServerOff size={24} color="#dc2626" style={{ flexShrink: 0, marginTop: '2px' }} />
+            <div>
+              <h4 style={{ color: '#991b1b', fontWeight: 700, marginBottom: '0.25rem' }}>
+                PDF Upload & Indexing Unavailable (Backend Offline)
+              </h4>
+              <p style={{ fontSize: '0.875rem', color: '#7f1d1d', marginBottom: '0.5rem' }}>
+                The frontend application shell is cached and running offline. Document text extraction, embedding generation, and ChromaDB storage require the local FastAPI backend server:
+              </p>
+              <code style={{ display: 'inline-block', backgroundColor: '#fee2e2', color: '#991b1b', padding: '0.35rem 0.65rem', borderRadius: '6px', fontSize: '0.85rem', fontFamily: 'monospace' }}>
+                python -m uvicorn backend.main:app --reload
+              </code>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Upload Dropzone */}
       <div
-        className={`upload-dropzone ${isDragging ? 'dragging' : ''}`}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        onClick={() => !isUploading && fileInputRef.current?.click()}
+        className={`upload-dropzone ${isDragging ? 'dragging' : ''} ${!isBackendHealthy ? 'disabled' : ''}`}
+        onDragOver={(e) => isBackendHealthy && handleDragOver(e)}
+        onDragLeave={(e) => isBackendHealthy && handleDragLeave(e)}
+        onDrop={(e) => isBackendHealthy && handleDrop(e)}
+        onClick={() => isBackendHealthy && !isUploading && fileInputRef.current?.click()}
+        style={!isBackendHealthy ? { opacity: 0.65, cursor: 'not-allowed', backgroundColor: '#f1f5f9' } : {}}
       >
         <input
           ref={fileInputRef}
@@ -126,7 +158,7 @@ export default function Documents({
           accept=".pdf"
           style={{ display: 'none' }}
           onChange={handleFileSelect}
-          disabled={isUploading}
+          disabled={isUploading || !isBackendHealthy}
         />
 
         <div className="upload-icon-circle">

@@ -7,12 +7,41 @@ import Documents from './components/Documents';
 import Chat from './components/Chat';
 import Summarizer from './components/Summarizer';
 import ImportantQuestions from './components/ImportantQuestions';
-import { checkBackendHealth, fetchIndexedDocuments } from './api';
+import OfflineIndicator from './components/OfflineIndicator';
+import AuthScreen from './components/AuthScreen';
+import {
+  checkBackendHealth,
+  fetchIndexedDocuments,
+  getStoredUser,
+  getStoredToken,
+  fetchCurrentUser,
+  logoutUser,
+} from './api';
+import { BookOpen } from 'lucide-react';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('dashboard');
+  // Support PWA shortcuts via ?tab=... parameter
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const tab = params.get('tab');
+      if (tab && ['dashboard', 'documents', 'chat', 'summarizer', 'questions'].includes(tab)) {
+        return tab;
+      }
+    } catch {
+      // Fallback
+    }
+    return 'dashboard';
+  });
+
+  // User Authentication State
+  const [currentUser, setCurrentUser] = useState(() => getStoredUser());
+  const [isCheckingAuth, setIsCheckingAuth] = useState(() => Boolean(getStoredToken()));
+
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isBackendHealthy, setIsBackendHealthy] = useState(false);
+  const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
+  const [wasOffline, setWasOffline] = useState(false);
   const [documents, setDocuments] = useState([]);
   const [selectedDocument, setSelectedDocument] = useState(null);
   const [queryCount, setQueryCount] = useState(() => {
@@ -22,6 +51,16 @@ export default function App() {
     } catch {
       return 0;
     }
+  });
+
+  // PWA Install prompt state
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [isInstalled, setIsInstalled] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    return (
+      window.matchMedia('(display-mode: standalone)').matches ||
+      window.navigator.standalone === true
+    );
   });
 
   // Verify backend health
@@ -34,8 +73,14 @@ export default function App() {
     }
   }, []);
 
-  // Fetch indexed documents list
+  // Fetch indexed documents list scoped to authenticated user
   const refreshDocuments = useCallback(async () => {
+    if (!getStoredToken()) {
+      setDocuments([]);
+      setSelectedDocument(null);
+      return;
+    }
+
     try {
       const data = await fetchIndexedDocuments();
       const docs = data.documents || [];
@@ -52,15 +97,132 @@ export default function App() {
     }
   }, []);
 
+  // Handle Logout - clears session and redirects directly to Login/Register screen
+  const handleLogout = useCallback(() => {
+    logoutUser();
+    setCurrentUser(null);
+    setDocuments([]);
+    setSelectedDocument(null);
+    setActiveTab('dashboard');
+    setIsCheckingAuth(false);
+  }, []);
+
+  // Handle Authentication Success - redirects to Dashboard
+  const handleAuthSuccess = (user) => {
+    setCurrentUser(user);
+    setActiveTab('dashboard');
+    refreshDocuments();
+  };
+
+  // Session validation and recovery on mount
+  useEffect(() => {
+    if (getStoredToken()) {
+      setIsCheckingAuth(true);
+      fetchCurrentUser()
+        .then((profile) => {
+          if (profile) {
+            setCurrentUser(profile);
+            refreshDocuments();
+          } else {
+            handleLogout();
+          }
+        })
+        .catch(() => {
+          handleLogout();
+        })
+        .finally(() => {
+          setIsCheckingAuth(false);
+        });
+    } else {
+      setIsCheckingAuth(false);
+    }
+  }, [handleLogout, refreshDocuments]);
+
+  // Global listener for unauthorized (expired or invalid token) responses
+  useEffect(() => {
+    const handleUnauthorized = () => {
+      handleLogout();
+    };
+
+    window.addEventListener('study-ai:unauthorized', handleUnauthorized);
+    return () => window.removeEventListener('study-ai:unauthorized', handleUnauthorized);
+  }, [handleLogout]);
+
+  // Monitor online / offline network state
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      setWasOffline(true);
+      checkHealth();
+      refreshDocuments();
+      setTimeout(() => setWasOffline(false), 4000);
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [checkHealth, refreshDocuments]);
+
+  // Monitor PWA installation readiness
+  useEffect(() => {
+    const handleBeforeInstall = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+
+    const handleAppInstalled = () => {
+      setIsInstalled(true);
+      setDeferredPrompt(null);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstall);
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
+
+  // Trigger PWA Installation prompt
+  const handleInstallApp = async () => {
+    if (!deferredPrompt) {
+      alert(
+        'To install Offline Study AI on this device, open your browser menu (⋮ or Share) and choose "Install Offline Study AI" or "Add to Home Screen".'
+      );
+      return;
+    }
+    try {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === 'accepted') {
+        setIsInstalled(true);
+        setDeferredPrompt(null);
+      }
+    } catch (err) {
+      console.warn('Error during PWA installation:', err);
+    }
+  };
+
   // Initial load
   useEffect(() => {
     checkHealth();
-    refreshDocuments();
+    if (currentUser) {
+      refreshDocuments();
+    }
 
     // Check health every 30 seconds
     const interval = setInterval(checkHealth, 30000);
     return () => clearInterval(interval);
-  }, [checkHealth, refreshDocuments]);
+  }, [checkHealth, refreshDocuments, currentUser]);
 
   const handleSelectDocumentForChat = (doc) => {
     setSelectedDocument(doc);
@@ -93,6 +255,37 @@ export default function App() {
     });
   };
 
+  const canInstall = Boolean(deferredPrompt && !isInstalled);
+
+  // 1. Initial Authentication Check Screen
+  if (isCheckingAuth) {
+    return (
+      <div className="auth-splash-screen">
+        <div className="auth-brand-icon-box" style={{ width: 56, height: 56, borderRadius: 14 }}>
+          <BookOpen size={30} />
+        </div>
+        <div style={{ marginTop: '1.25rem', fontWeight: 700, fontSize: '1.25rem', color: '#0f172a' }}>
+          Offline Study AI
+        </div>
+        <div style={{ fontSize: '0.85rem', color: '#64748b', marginTop: '0.35rem' }}>
+          Restoring secure study session...
+        </div>
+      </div>
+    );
+  }
+
+  // 2. Mandatory Authentication Gate: Neither Dashboard nor Sidebar is shown to unauthenticated users
+  if (!currentUser) {
+    return (
+      <AuthScreen
+        onAuthSuccess={handleAuthSuccess}
+        isBackendHealthy={isBackendHealthy}
+        isOnline={isOnline}
+      />
+    );
+  }
+
+  // 3. Fully Authenticated Application Shell
   return (
     <div className="app-layout">
       {/* Dark Navy Sidebar */}
@@ -102,6 +295,11 @@ export default function App() {
         isOpen={isSidebarOpen}
         setIsOpen={setIsSidebarOpen}
         isBackendHealthy={isBackendHealthy}
+        isOnline={isOnline}
+        canInstall={canInstall}
+        onInstallClick={handleInstallApp}
+        currentUser={currentUser}
+        onLogout={handleLogout}
       />
 
       {/* Main Wrapper */}
@@ -110,6 +308,21 @@ export default function App() {
           activeTab={activeTab}
           setIsSidebarOpen={setIsSidebarOpen}
           isBackendHealthy={isBackendHealthy}
+          isOnline={isOnline}
+          canInstall={canInstall}
+          onInstallClick={handleInstallApp}
+          currentUser={currentUser}
+          onLogout={handleLogout}
+        />
+
+        {/* Global Offline & Installation Indicators */}
+        <OfflineIndicator
+          isOnline={isOnline}
+          wasOffline={wasOffline}
+          isBackendHealthy={isBackendHealthy}
+          deferredPrompt={deferredPrompt}
+          isInstalled={isInstalled}
+          onInstallClick={handleInstallApp}
         />
 
         <main style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
@@ -120,6 +333,7 @@ export default function App() {
               setActiveTab={setActiveTab}
               onSelectDocumentForChat={handleSelectDocumentForChat}
               isBackendHealthy={isBackendHealthy}
+              currentUser={currentUser}
             />
           )}
 
@@ -131,6 +345,9 @@ export default function App() {
               onSelectDocumentForChat={handleSelectDocumentForChat}
               onSelectDocumentForSummarize={handleSelectDocumentForSummarize}
               onSelectDocumentForQuestions={handleSelectDocumentForQuestions}
+              isBackendHealthy={isBackendHealthy}
+              isOnline={isOnline}
+              currentUser={currentUser}
             />
           )}
 
@@ -141,6 +358,9 @@ export default function App() {
               onSelectDocument={setSelectedDocument}
               setActiveTab={setActiveTab}
               onSelectDocumentForChat={handleSelectDocumentForChat}
+              isBackendHealthy={isBackendHealthy}
+              isOnline={isOnline}
+              currentUser={currentUser}
             />
           )}
 
@@ -151,6 +371,9 @@ export default function App() {
               onSelectDocument={setSelectedDocument}
               setActiveTab={setActiveTab}
               onSelectDocumentForChat={handleSelectDocumentForChat}
+              isBackendHealthy={isBackendHealthy}
+              isOnline={isOnline}
+              currentUser={currentUser}
             />
           )}
 
@@ -162,6 +385,9 @@ export default function App() {
               onClearSelectedDocument={handleClearSelectedDocument}
               onQuestionAsked={handleQuestionAsked}
               setActiveTab={setActiveTab}
+              isBackendHealthy={isBackendHealthy}
+              isOnline={isOnline}
+              currentUser={currentUser}
             />
           )}
         </main>

@@ -7,10 +7,26 @@ import {
   BookOpen,
   Sparkles,
   FileQuestion,
+  Download,
   X,
+  User,
+  LogIn,
+  LogOut,
 } from 'lucide-react';
 
-export default function Sidebar({ activeTab, setActiveTab, isOpen, setIsOpen, isBackendHealthy }) {
+export default function Sidebar({
+  activeTab,
+  setActiveTab,
+  isOpen,
+  setIsOpen,
+  isBackendHealthy,
+  isOnline = true,
+  canInstall = false,
+  onInstallClick,
+  currentUser = null,
+  onOpenAuth,
+  onLogout,
+}) {
   const mainNavItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'documents', label: 'My Documents', icon: FileText },
@@ -38,6 +54,7 @@ export default function Sidebar({ activeTab, setActiveTab, isOpen, setIsOpen, is
               className="mobile-close-btn"
               onClick={() => setIsOpen(false)}
               style={{ background: 'transparent', color: '#94a3b8', padding: '0.25rem' }}
+              aria-label="Close sidebar"
             >
               <X size={20} />
             </button>
@@ -85,13 +102,74 @@ export default function Sidebar({ activeTab, setActiveTab, isOpen, setIsOpen, is
         </nav>
 
         <div className="sidebar-footer">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: '0.8rem', color: '#cbd5e1' }}>System Status:</span>
-            <span className={`status-badge ${isBackendHealthy ? 'online' : 'offline'}`}>
-              <span className="status-dot"></span>
-              {isBackendHealthy ? 'Online' : 'Offline'}
-            </span>
+          {/* Account Section */}
+          {currentUser ? (
+            <div className="sidebar-account-box">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', minWidth: 0 }}>
+                <div className="sidebar-avatar">
+                  <User size={16} />
+                </div>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontWeight: 600, color: '#f8fafc', fontSize: '0.85rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {currentUser.username}
+                  </div>
+                  <div style={{ fontSize: '0.7rem', color: '#94a3b8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {currentUser.email || 'Private Account'}
+                  </div>
+                </div>
+              </div>
+              <button
+                className="sidebar-logout-btn"
+                onClick={onLogout}
+                title="Log out of this account"
+              >
+                <LogOut size={13} />
+                <span>Sign Out</span>
+              </button>
+            </div>
+          ) : (
+            <button
+              className="sidebar-login-btn"
+              onClick={() => {
+                onOpenAuth();
+                setIsOpen(false);
+              }}
+              title="Sign in to save documents to your private library"
+            >
+              <LogIn size={15} />
+              <span>Sign In / Register</span>
+            </button>
+          )}
+
+          {canInstall && (
+            <button
+              className="sidebar-install-btn"
+              onClick={onInstallClick}
+              title="Install Offline Study AI on your device"
+            >
+              <Download size={16} />
+              <span>Install App</span>
+            </button>
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem', marginTop: canInstall ? '0.4rem' : '0' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>App Shell:</span>
+              <span className={`status-badge ${isOnline ? 'online' : 'cached'}`}>
+                <span className="status-dot"></span>
+                {isOnline ? 'Online' : 'PWA Cached'}
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>AI Backend:</span>
+              <span className={`status-badge ${isBackendHealthy ? 'online' : 'offline'}`}>
+                <span className="status-dot"></span>
+                {isBackendHealthy ? 'Connected' : 'Offline'}
+              </span>
+            </div>
           </div>
+
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', marginTop: '0.4rem', color: '#94a3b8', fontSize: '0.75rem' }}>
             <ShieldCheck size={16} color="#34d399" />
             <span>100% Private &amp; Local</span>

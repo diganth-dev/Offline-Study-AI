@@ -12,6 +12,7 @@ import {
   Loader2,
   Sparkles,
   Globe,
+  ServerOff,
 } from 'lucide-react';
 import { askAiQuestion } from '../api';
 import MarkdownRenderer from './MarkdownRenderer';
@@ -23,10 +24,15 @@ export default function Chat({
   onClearSelectedDocument,
   onQuestionAsked,
   setActiveTab,
+  isBackendHealthy = true,
+  currentUser = null,
+  onOpenAuth,
 }) {
+  const storageKey = currentUser ? `study_ai_chat_history_${currentUser.user_id}` : 'study_ai_chat_history_guest';
+
   const [messages, setMessages] = useState(() => {
     try {
-      const saved = localStorage.getItem('study_ai_chat_history');
+      const saved = localStorage.getItem(currentUser ? `study_ai_chat_history_${currentUser.user_id}` : 'study_ai_chat_history_guest');
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
@@ -40,15 +46,26 @@ export default function Chat({
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
 
-  // Persist chat history to localStorage
+  // Switch chat history when currentUser changes
   useEffect(() => {
     try {
-      localStorage.setItem('study_ai_chat_history', JSON.stringify(messages));
+      const saved = localStorage.getItem(storageKey);
+      setMessages(saved ? JSON.parse(saved) : []);
+    } catch {
+      setMessages([]);
+    }
+    setErrorMessage(null);
+  }, [storageKey]);
+
+  // Persist chat history to user-scoped localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(messages));
     } catch {
       // Ignore storage errors
     }
     scrollToBottom();
-  }, [messages]);
+  }, [messages, storageKey]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -59,13 +76,19 @@ export default function Chat({
     if (window.confirm('Start a new study conversation? This will clear the current chat history.')) {
       setMessages([]);
       setErrorMessage(null);
-      localStorage.removeItem('study_ai_chat_history');
+      localStorage.removeItem(storageKey);
     }
   };
 
   const handleSend = async (questionText = inputQuestion) => {
     const q = (questionText || '').trim();
     if (!q || isLoading) return;
+
+    if (!currentUser) {
+      setErrorMessage('Authentication required. Please sign in or create an account to chat with your private documents.');
+      if (onOpenAuth) onOpenAuth();
+      return;
+    }
 
     if (documents.length === 0) {
       setErrorMessage('You have not uploaded any study documents yet. Please upload a PDF in "My Documents" first so the AI can answer your questions.');
@@ -235,6 +258,25 @@ export default function Chat({
 
       {/* Messages Scroll Area */}
       <div className="chat-messages-scroll">
+        {!isBackendHealthy && (
+          <div className="card backend-warning-card" style={{ margin: '1rem 0', borderColor: '#fecaca', backgroundColor: '#fff5f5' }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '0.85rem' }}>
+              <ServerOff size={22} color="#dc2626" style={{ flexShrink: 0, marginTop: '2px' }} />
+              <div>
+                <h4 style={{ color: '#991b1b', fontWeight: 700, fontSize: '0.95rem', marginBottom: '0.25rem' }}>
+                  AI Study Chat Unavailable (Backend Offline)
+                </h4>
+                <p style={{ fontSize: '0.85rem', color: '#7f1d1d', marginBottom: '0.4rem' }}>
+                  The frontend app shell is cached and running offline. Local AI answer generation and ChromaDB retrieval require the local Python FastAPI backend server to be running:
+                </p>
+                <code style={{ display: 'inline-block', backgroundColor: '#fee2e2', color: '#991b1b', padding: '0.25rem 0.5rem', borderRadius: '4px', fontSize: '0.8rem', fontFamily: 'monospace' }}>
+                  python -m uvicorn backend.main:app --reload
+                </code>
+              </div>
+            </div>
+          </div>
+        )}
+
         {documents.length === 0 && (
           <div className="alert alert-info" style={{ margin: '1rem 0' }}>
             <AlertCircle size={20} style={{ flexShrink: 0 }} />
@@ -276,7 +318,7 @@ export default function Chat({
                   key={idx}
                   className="starter-chip"
                   onClick={() => handleSend(q)}
-                  disabled={isLoading}
+                  disabled={isLoading || !isBackendHealthy}
                 >
                   "{q}"
                 </button>
@@ -434,7 +476,9 @@ export default function Chat({
             ref={textareaRef}
             className="chat-textarea"
             placeholder={
-              documents.length === 0
+              !isBackendHealthy
+                ? 'AI backend is unreachable. Start FastAPI locally (python -m uvicorn backend.main:app) to ask questions...'
+                : documents.length === 0
                 ? 'Upload a document first to start asking study questions...'
                 : selectedDocument
                 ? `Ask a question about ${selectedDocument.filename}... (Press Enter to send, Shift+Enter for new line)`
@@ -443,15 +487,15 @@ export default function Chat({
             value={inputQuestion}
             onChange={(e) => setInputQuestion(e.target.value)}
             onKeyDown={handleKeyDown}
-            disabled={isLoading || documents.length === 0}
+            disabled={isLoading || documents.length === 0 || !isBackendHealthy}
             rows={1}
           />
 
           <button
             type="submit"
             className="send-btn"
-            disabled={!inputQuestion.trim() || isLoading || documents.length === 0}
-            title="Send Question"
+            disabled={!inputQuestion.trim() || isLoading || documents.length === 0 || !isBackendHealthy}
+            title={!isBackendHealthy ? 'Backend offline' : 'Send Question'}
           >
             {isLoading ? <Loader2 size={20} className="spinner" /> : <Send size={20} />}
           </button>

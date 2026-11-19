@@ -13,8 +13,10 @@ frontend/dist/
 .env
 .env.*
 
-# Database
+# Database and Secrets
 backend/storage/chroma_db/
+backend/storage/users.db*
+backend/storage/.jwt_secret
 
 # Logs
 *.log

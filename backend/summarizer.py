@@ -207,11 +207,12 @@ def summarize_document(
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
     ollama_base_url: str = OLLAMA_BASE_URL,
     include_chapters: bool = True,
+    user_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Generates a complete, structured summary of a specific indexed document.
 
     Workflow:
-    1. Validates document existence in ChromaDB.
+    1. Validates document existence and ownership in ChromaDB for the user.
     2. Retrieves all chunks sequentially for the document.
     3. Handles empty or non-extractable documents gracefully.
     4. For long PDFs, batches chunks sequentially to avoid single-prompt context overflow.
@@ -226,25 +227,27 @@ def summarize_document(
     if not clean_doc_id:
         raise HTTPException(status_code=400, detail="Document ID cannot be empty.")
 
-    # 1. Fetch document metadata summary
+    # 1. Fetch document metadata summary (scoped strictly to user_id)
     indexed_docs = get_indexed_documents(
         collection_name=collection_name,
         persist_directory=persist_directory,
+        user_id=user_id,
     )
     doc_meta = next((d for d in indexed_docs if d.get("document_id") == clean_doc_id), None)
     if not doc_meta:
         raise HTTPException(
             status_code=404,
-            detail=f"Document with ID '{clean_doc_id}' was not found in the study library.",
+            detail=f"Document with ID '{clean_doc_id}' was not found in your study library.",
         )
 
     filename = doc_meta["filename"]
 
-    # 2. Retrieve all chunks belonging to this document
+    # 2. Retrieve all chunks belonging to this document (scoped strictly to user_id)
     all_chunks = get_document_chunks(
         document_id=clean_doc_id,
         collection_name=collection_name,
         persist_directory=persist_directory,
+        user_id=user_id,
     )
 
     if not all_chunks or not any(c.get("text", "").strip() for c in all_chunks):

@@ -72,11 +72,12 @@ def index_document(
     total_pages: int,
     chunks: list[dict[str, Any]],
     collection_name: str = DEFAULT_COLLECTION_NAME,
-    persist_directory: Optional[str] = None
+    persist_directory: Optional[str] = None,
+    user_id: Optional[str] = "default_user",
 ) -> dict[str, Any]:
     """Indexes document chunks into ChromaDB with Hugging Face embeddings and metadata.
 
-    Removes any existing chunks for this filename to prevent duplicate entries
+    Removes any existing chunks for this user and filename to prevent duplicate entries
     when the same PDF is re-indexed.
 
     Args:
@@ -85,6 +86,7 @@ def index_document(
         chunks: List of chunk dictionaries containing 'chunk_number', 'page_number', 'text'.
         collection_name: Name of the Chroma collection.
         persist_directory: Optional directory path for ChromaDB.
+        user_id: User identifier owning this document.
 
     Returns:
         Summary dict containing document_id, filename, total_pages, and indexed_chunks count.
@@ -94,10 +96,14 @@ def index_document(
 
     collection = get_collection(collection_name=collection_name, persist_directory=persist_directory)
     doc_id = generate_document_id(filename)
+    active_user_id = user_id or "default_user"
 
-    # Prevent duplicate document entries: remove prior chunks for this filename
+    # Prevent duplicate document entries: remove prior chunks for this user and filename
     try:
-        collection.delete(where={"filename": filename})
+        if active_user_id:
+            collection.delete(where={"$and": [{"user_id": active_user_id}, {"filename": filename}]})
+        else:
+            collection.delete(where={"filename": filename})
     except Exception:
         pass
 
@@ -113,10 +119,11 @@ def index_document(
         page_num = int(chunk["page_number"])
         chunk_text = chunk["text"]
 
-        chunk_id = f"{doc_id}_c{chunk_num}"
+        chunk_id = f"{active_user_id}_{doc_id}_c{chunk_num}"
         ids.append(chunk_id)
         documents.append(chunk_text)
         metadatas.append({
+            "user_id": active_user_id,
             "document_id": doc_id,
             "filename": filename,
             "page_number": page_num,
@@ -145,13 +152,14 @@ def search_documents(
     collection_name: str = DEFAULT_COLLECTION_NAME,
     persist_directory: Optional[str] = None,
     document_id: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Performs hybrid retrieval (semantic vector search + BM25 keyword matching)
     across indexed document chunks.
 
     Combines dense cosine similarity from Hugging Face embeddings with BM25Okapi,
     exact phrase matching, and domain-general synonym expansion while strictly
-    enforcing document-specific filtering when document_id is provided.
+    enforcing user-specific and document-specific filtering when provided.
 
     Args:
         query: Search query text.
@@ -159,6 +167,7 @@ def search_documents(
         collection_name: Name of the Chroma collection.
         persist_directory: Optional directory path for ChromaDB.
         document_id: Optional document ID to restrict search to a specific document.
+        user_id: Optional user ID to restrict search strictly to the authenticated user.
 
     Returns:
         List of result dictionaries containing filename, page_number, chunk_number,
@@ -173,6 +182,19 @@ def search_documents(
     if count == 0:
         return []
 
+    # Build strict where clause
+    where_conditions = []
+    if user_id:
+        where_conditions.append({"user_id": user_id})
+    if document_id:
+        where_conditions.append({"document_id": document_id})
+
+    where_clause: Optional[dict[str, Any]] = None
+    if len(where_conditions) == 1:
+        where_clause = where_conditions[0]
+    elif len(where_conditions) > 1:
+        where_clause = {"$and": where_conditions}
+
     # 1. Fetch dense vector search candidates
     query_emb = generate_query_embedding(clean_query)
     candidate_k = min(count, max(top_k * 4, 25))
@@ -182,8 +204,8 @@ def search_documents(
         "n_results": candidate_k,
         "include": ["documents", "metadatas", "distances"],
     }
-    if document_id:
-        query_kwargs["where"] = {"document_id": document_id}
+    if where_clause:
+        query_kwargs["where"] = where_clause
 
     dense_res = collection.query(**query_kwargs)
 
@@ -216,8 +238,8 @@ def search_documents(
     # 2. In document-scoped mode or for small/medium collections, also fetch all chunks
     # belonging to the target scope to evaluate keyword BM25 matches that dense search might miss.
     get_kwargs: dict[str, Any] = {"include": ["documents", "metadatas"]}
-    if document_id:
-        get_kwargs["where"] = {"document_id": document_id}
+    if where_clause:
+        get_kwargs["where"] = where_clause
 
     # For scoped search, always get all document chunks (fast and guarantees full document coverage).
     # For global search, get all chunks if collection count <= 300.
@@ -280,14 +302,22 @@ def search_documents(
 
 def get_indexed_documents(
     collection_name: str = DEFAULT_COLLECTION_NAME,
-    persist_directory: Optional[str] = None
+    persist_directory: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
-    """Retrieves metadata summary for all unique documents indexed in ChromaDB."""
+    """Retrieves metadata summary for unique documents indexed in ChromaDB.
+
+    If user_id is provided, returns only documents belonging to that user.
+    """
     collection = get_collection(collection_name=collection_name, persist_directory=persist_directory)
     if collection.count() == 0:
         return []
 
-    items = collection.get(include=["metadatas"])
+    get_kwargs: dict[str, Any] = {"include": ["metadatas"]}
+    if user_id:
+        get_kwargs["where"] = {"user_id": user_id}
+
+    items = collection.get(**get_kwargs)
     metas = items.get("metadatas", [])
     docs_map: dict[str, dict[str, Any]] = {}
 
@@ -321,9 +351,13 @@ def get_indexed_documents(
 def get_document_chunks(
     document_id: str,
     collection_name: str = DEFAULT_COLLECTION_NAME,
-    persist_directory: Optional[str] = None
+    persist_directory: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """Retrieves all indexed text chunks belonging to a document from ChromaDB.
+
+    Enforces ownership verification: if user_id is provided, chunks are returned
+    only if the document belongs to that user.
 
     Returns the chunks sorted by page_number and chunk_number.
     """
@@ -331,8 +365,13 @@ def get_document_chunks(
     if collection.count() == 0:
         return []
 
+    if user_id:
+        where_filter = {"$and": [{"user_id": user_id}, {"document_id": document_id}]}
+    else:
+        where_filter = {"document_id": document_id}
+
     items = collection.get(
-        where={"document_id": document_id},
+        where=where_filter,
         include=["documents", "metadatas"]
     )
     docs = items.get("documents", [])
@@ -350,6 +389,8 @@ def get_document_chunks(
             "page_number": int(meta.get("page_number", 1)),
             "chunk_number": int(meta.get("chunk_number", 1)),
             "text": docs[i],
+            "user_id": meta.get("user_id", ""),
+            "metadata": meta,
             "distance": 0.0,
             "similarity_score": 1.0,
         })
@@ -386,12 +427,18 @@ def select_representative_chunks(
 def delete_document(
     filename: str,
     collection_name: str = DEFAULT_COLLECTION_NAME,
-    persist_directory: Optional[str] = None
+    persist_directory: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> int:
-    """Deletes all chunks belonging to the given filename from ChromaDB."""
+    """Deletes all chunks belonging to the given filename for the specified user from ChromaDB."""
     collection = get_collection(collection_name=collection_name, persist_directory=persist_directory)
-    existing = collection.get(where={"filename": filename})
+    if user_id:
+        where_filter = {"$and": [{"user_id": user_id}, {"filename": filename}]}
+    else:
+        where_filter = {"filename": filename}
+
+    existing = collection.get(where=where_filter)
     count = len(existing.get("ids", []))
     if count > 0:
-        collection.delete(where={"filename": filename})
+        collection.delete(where=where_filter)
     return count
