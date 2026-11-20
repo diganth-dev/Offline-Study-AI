@@ -16,6 +16,8 @@ import {
   getStoredToken,
   fetchCurrentUser,
   logoutUser,
+  isTokenExpired,
+  clearAuthSession,
 } from './api';
 import { BookOpen } from 'lucide-react';
 
@@ -34,15 +36,38 @@ export default function App() {
     return 'dashboard';
   });
 
-  // User Authentication State
-  const [currentUser, setCurrentUser] = useState(() => getStoredUser());
-  const [isCheckingAuth, setIsCheckingAuth] = useState(() => Boolean(getStoredToken()));
+  // User Authentication State - restore securely from localStorage subject to token expiry
+  const [currentUser, setCurrentUser] = useState(() => {
+    const token = getStoredToken();
+    if (!token || isTokenExpired(token)) {
+      if (token && isTokenExpired(token)) {
+        clearAuthSession();
+      }
+      return null;
+    }
+    return getStoredUser();
+  });
+  const [isCheckingAuth, setIsCheckingAuth] = useState(() => {
+    const token = getStoredToken();
+    return Boolean(token && !isTokenExpired(token));
+  });
 
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isBackendHealthy, setIsBackendHealthy] = useState(false);
   const [isOnline, setIsOnline] = useState(() => (typeof navigator !== 'undefined' ? navigator.onLine : true));
   const [wasOffline, setWasOffline] = useState(false);
-  const [documents, setDocuments] = useState([]);
+  const [documents, setDocuments] = useState(() => {
+    try {
+      const user = getStoredUser();
+      if (user && user.user_id) {
+        const cached = localStorage.getItem(`study_ai_cached_docs_${user.user_id}`);
+        return cached ? JSON.parse(cached) : [];
+      }
+    } catch {
+      // ignore
+    }
+    return [];
+  });
   const [selectedDocument, setSelectedDocument] = useState(null);
   const [queryCount, setQueryCount] = useState(() => {
     try {
@@ -75,7 +100,8 @@ export default function App() {
 
   // Fetch indexed documents list scoped to authenticated user
   const refreshDocuments = useCallback(async () => {
-    if (!getStoredToken()) {
+    const token = getStoredToken();
+    if (!token || isTokenExpired(token)) {
       setDocuments([]);
       setSelectedDocument(null);
       return;
@@ -86,6 +112,16 @@ export default function App() {
       const docs = data.documents || [];
       setDocuments(docs);
 
+      // Cache documents locally for offline viewing
+      try {
+        const user = getStoredUser();
+        if (user && user.user_id) {
+          localStorage.setItem(`study_ai_cached_docs_${user.user_id}`, JSON.stringify(docs));
+        }
+      } catch {
+        // ignore
+      }
+
       // Clean up selected document if it was deleted
       setSelectedDocument((prev) => {
         if (!prev) return null;
@@ -94,11 +130,31 @@ export default function App() {
       });
     } catch (err) {
       console.warn('Could not load documents list:', err);
+      // Fallback: restore documents from offline cache if available
+      try {
+        const user = getStoredUser();
+        if (user && user.user_id) {
+          const cached = localStorage.getItem(`study_ai_cached_docs_${user.user_id}`);
+          if (cached) {
+            setDocuments(JSON.parse(cached));
+          }
+        }
+      } catch {
+        // ignore
+      }
     }
   }, []);
 
   // Handle Logout - clears session and redirects directly to Login/Register screen
   const handleLogout = useCallback(() => {
+    try {
+      const user = getStoredUser();
+      if (user && user.user_id) {
+        localStorage.removeItem(`study_ai_cached_docs_${user.user_id}`);
+      }
+    } catch {
+      // ignore
+    }
     logoutUser();
     setCurrentUser(null);
     setDocuments([]);
@@ -116,26 +172,47 @@ export default function App() {
 
   // Session validation and recovery on mount
   useEffect(() => {
-    if (getStoredToken()) {
-      setIsCheckingAuth(true);
-      fetchCurrentUser()
-        .then((profile) => {
-          if (profile) {
-            setCurrentUser(profile);
-            refreshDocuments();
-          } else {
-            handleLogout();
-          }
-        })
-        .catch(() => {
-          handleLogout();
-        })
-        .finally(() => {
-          setIsCheckingAuth(false);
-        });
-    } else {
+    const token = getStoredToken();
+    if (!token) {
       setIsCheckingAuth(false);
+      return;
     }
+
+    // Check client-side token expiration
+    if (isTokenExpired(token)) {
+      handleLogout();
+      setIsCheckingAuth(false);
+      return;
+    }
+
+    setIsCheckingAuth(true);
+
+    fetchCurrentUser()
+      .then((profile) => {
+        if (profile) {
+          setCurrentUser(profile);
+          setIsBackendHealthy(true);
+          refreshDocuments();
+        } else {
+          handleLogout();
+        }
+      })
+      .catch((err) => {
+        // Clear token ONLY when the backend explicitly returns an authentication failure (HTTP 401 or 403)
+        if (err && (err.status === 401 || err.status === 403)) {
+          handleLogout();
+        } else {
+          // Network error or backend offline: preserve the existing login session
+          setIsBackendHealthy(false);
+          const cachedUser = getStoredUser();
+          if (cachedUser) {
+            setCurrentUser(cachedUser);
+          }
+        }
+      })
+      .finally(() => {
+        setIsCheckingAuth(false);
+      });
   }, [handleLogout, refreshDocuments]);
 
   // Global listener for unauthorized (expired or invalid token) responses
@@ -154,6 +231,22 @@ export default function App() {
       setIsOnline(true);
       setWasOffline(true);
       checkHealth();
+      const token = getStoredToken();
+      if (token) {
+        if (isTokenExpired(token)) {
+          handleLogout();
+        } else {
+          fetchCurrentUser()
+            .then((profile) => {
+              if (profile) setCurrentUser(profile);
+            })
+            .catch((err) => {
+              if (err && (err.status === 401 || err.status === 403)) {
+                handleLogout();
+              }
+            });
+        }
+      }
       refreshDocuments();
       setTimeout(() => setWasOffline(false), 4000);
     };
@@ -169,7 +262,7 @@ export default function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [checkHealth, refreshDocuments]);
+  }, [checkHealth, refreshDocuments, handleLogout]);
 
   // Monitor PWA installation readiness
   useEffect(() => {

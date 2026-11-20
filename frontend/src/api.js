@@ -3,11 +3,66 @@
  * Communicates with the local FastAPI backend on http://127.0.0.1:8000.
  */
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+const API_BASE_URL = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_URL) || 'http://127.0.0.1:8000';
 
 // Storage keys for authentication tokens and user state
-const TOKEN_STORAGE_KEY = 'study_ai_token';
-const USER_STORAGE_KEY = 'study_ai_user';
+export const TOKEN_STORAGE_KEY = 'study_ai_token';
+export const USER_STORAGE_KEY = 'study_ai_user';
+
+/**
+ * Safely parses the payload of a JWT token without requiring external libraries.
+ * Returns null if the token is invalid, malformed, or missing.
+ */
+export function parseJwtPayload(token) {
+  if (!token || typeof token !== 'string') {
+    return null;
+  }
+  const parts = token.split('.');
+  if (parts.length !== 3) {
+    return null;
+  }
+  try {
+    let base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (base64.length % 4 !== 0) {
+      base64 += '=';
+    }
+    const decodedStr = typeof atob === 'function'
+      ? atob(base64)
+      : (typeof Buffer !== 'undefined' ? Buffer.from(base64, 'base64').toString('binary') : '');
+
+    if (!decodedStr) return null;
+
+    try {
+      return JSON.parse(decodedStr);
+    } catch {
+      // Handle potential percent-encoded multi-byte UTF-8 sequences
+      const jsonPayload = decodeURIComponent(
+        decodedStr
+          .split('')
+          .map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+          .join('')
+      );
+      return JSON.parse(jsonPayload);
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Checks whether a JWT token has expired based on its 'exp' claim.
+ * Returns true if the token is expired, invalid, or malformed.
+ * Returns false only if the token contains a valid future expiration timestamp.
+ */
+export function isTokenExpired(token) {
+  if (!token) return true;
+  const payload = parseJwtPayload(token);
+  if (!payload || typeof payload.exp !== 'number') {
+    return true;
+  }
+  const nowInSeconds = Math.floor(Date.now() / 1000);
+  return payload.exp <= nowInSeconds;
+}
 
 /**
  * Retrieves the stored JWT authentication token from localStorage.
@@ -22,14 +77,40 @@ export function getStoredToken() {
 
 /**
  * Retrieves the stored user profile object from localStorage.
+ * If the user profile object is missing or incomplete but a valid, unexpired
+ * JWT token exists in storage, safely reconstructs the user profile from the token payload.
  */
 export function getStoredUser() {
   try {
     const raw = localStorage.getItem(USER_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : null;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && (parsed.username || parsed.user_id)) {
+        return parsed;
+      }
+    }
   } catch {
-    return null;
+    // Fall back to token extraction
   }
+
+  // Fallback: recover user profile from stored JWT token if unexpired
+  try {
+    const token = getStoredToken();
+    if (token && !isTokenExpired(token)) {
+      const payload = parseJwtPayload(token);
+      if (payload && payload.username) {
+        return {
+          user_id: payload.sub || '',
+          username: payload.username,
+          email: payload.email || '',
+        };
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  return null;
 }
 
 /**
@@ -104,10 +185,10 @@ async function safeFetch(url, options = {}) {
     const response = await fetch(url, mergedOptions);
     return await handleResponse(response);
   } catch (err) {
-    // If it's an HTTP error handled by handleResponse, handle 401 and propagate
+    // If it's an explicit HTTP response error from the backend:
     if (err.status) {
-      if (err.status === 401 && !url.includes('/auth/login') && !url.includes('/auth/register')) {
-        // Expired or invalid token encountered on protected endpoint
+      if ((err.status === 401 || err.status === 403) && !url.includes('/auth/login') && !url.includes('/auth/register')) {
+        // Explicit authentication failure (401 Unauthorized or 403 Forbidden)
         clearAuthSession();
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('study-ai:unauthorized', { detail: { error: err } }));
@@ -116,6 +197,8 @@ async function safeFetch(url, options = {}) {
       throw err;
     }
 
+    // Network errors (backend unreachable, network disconnected, timeout, DNS failure):
+    // DO NOT clear auth session - the user is offline or the backend server is stopped.
     const isBrowserOffline = typeof navigator !== 'undefined' && !navigator.onLine;
 
     if (isBrowserOffline) {
@@ -230,8 +313,21 @@ export async function resetUserPassword(token, newPassword, email = null) {
 
 /**
  * Retrieves the current authenticated user's profile from /auth/me.
+ * Validates token expiry client-side before attempting request.
+ * Leaves session intact if network/backend is unavailable.
  */
 export async function fetchCurrentUser() {
+  const token = getStoredToken();
+  if (!token) return null;
+
+  // Genuine token expiry check: if token has passed expiration timestamp, clear session
+  if (isTokenExpired(token)) {
+    clearAuthSession();
+    const error = new Error('Session expired. Please log in again.');
+    error.status = 401;
+    throw error;
+  }
+
   const data = await safeFetch(`${API_BASE_URL}/auth/me`, {
     method: 'GET',
     headers: { 'Accept': 'application/json' },
