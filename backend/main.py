@@ -1,7 +1,20 @@
+import os
+import json
+import logging
+from typing import Any, Optional
+from dotenv import load_dotenv
+
 from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Any, Optional
+
+# Load environment configuration (.env files)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
+load_dotenv(os.path.join(os.path.dirname(BASE_DIR), ".env"))
+load_dotenv()
+
+logger = logging.getLogger("offline_study_ai.cors")
 
 try:
     import pymupdf as fitz
@@ -289,6 +302,74 @@ class QuestionAnswerResponse(BaseModel):
 
 
 # ---------------------------------------------------------
+# CORS Configuration & Allowed Origins Setup
+# ---------------------------------------------------------
+
+DEFAULT_ALLOWED_ORIGINS: list[str] = [
+    "https://offline-study-ai.vercel.app",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+
+def parse_allowed_origins(origins_val: Optional[str] = None) -> list[str]:
+    """Parse, sanitize, and validate allowed CORS origins from an environment variable or raw string.
+
+    Rules:
+    - Never permits wildcard '*' when credentials are enabled (Requirement 4).
+    - Strips whitespace and trailing slashes for exact origin matching.
+    - Supports comma-separated strings or JSON string arrays.
+    - Falls back to safe default origins (production Vercel and local Vite dev) if unset or empty (Requirements 2, 3).
+    """
+    if origins_val is None:
+        origins_val = os.getenv("ALLOWED_ORIGINS")
+
+    if origins_val is None:
+        return list(DEFAULT_ALLOWED_ORIGINS)
+
+    trimmed = origins_val.strip()
+    if not trimmed:
+        return list(DEFAULT_ALLOWED_ORIGINS)
+
+    # Support JSON array representation e.g. ["http://localhost:5173", "https://offline-study-ai.vercel.app"]
+    origins_to_process: list[str] = []
+    if trimmed.startswith("[") and trimmed.endswith("]"):
+        try:
+            parsed = json.loads(trimmed)
+            if isinstance(parsed, list):
+                origins_to_process = [str(item) for item in parsed]
+            else:
+                origins_to_process = [trimmed]
+        except Exception:
+            origins_to_process = trimmed.strip("[]").split(",")
+    else:
+        origins_to_process = trimmed.split(",")
+
+    cleaned: list[str] = []
+    for item in origins_to_process:
+        origin = item.strip().rstrip("/")
+        # Requirement 4: Never use wildcard origins when credentials are enabled
+        if not origin or origin == "*":
+            continue
+        if origin not in cleaned:
+            cleaned.append(origin)
+
+    if not cleaned:
+        logger.warning(
+            "No valid origins found in ALLOWED_ORIGINS (wildcard '*' is disallowed when allow_credentials=True). "
+            "Falling back to default allowed origins."
+        )
+        return list(DEFAULT_ALLOWED_ORIGINS)
+
+    return cleaned
+
+
+def get_allowed_origins() -> list[str]:
+    """Retrieves the active allowed origins list from environment or defaults."""
+    return parse_allowed_origins(os.getenv("ALLOWED_ORIGINS"))
+
+
+# ---------------------------------------------------------
 # FastAPI App Initialization
 # ---------------------------------------------------------
 
@@ -298,9 +379,14 @@ app = FastAPI(
     version="1.2.0"
 )
 
+# Resolve allowed origins from ALLOWED_ORIGINS env var or secure defaults
+ALLOWED_ORIGINS: list[str] = get_allowed_origins()
+app.state.allowed_origins = ALLOWED_ORIGINS
+
+# Secure CORS Middleware configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
